@@ -1,0 +1,153 @@
+name: Build unpacked Sapphire firmware
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/unpack-sapphire.yml"
+      - "tools/**"
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y squashfs-tools zstd
+
+      - name: Download original signed firmware
+        run: |
+          curl -fL --retry 5 --retry-delay 5 \
+            -o sapphire-24.29.03.signed \
+            https://prod-ota-firmware.iot.irobotapi.com/sapphire-24.29.03.signed
+          echo "017dbfa4578541228c3503348e8d13920c3bf93351373d49faa087fe4ae43e0a  sapphire-24.29.03.signed" | sha256sum -c -
+
+      - name: Split signed OTA into components
+        run: |
+          mkdir -p out/components out/kernel_boot
+          python3 - <<'PY'
+          from pathlib import Path
+          import mmap, re, struct, hashlib, json
+
+          src = Path("sapphire-24.29.03.signed")
+          out = Path("out/components")
+          KEY = {
+              "A":"TZ","B":"RPM","C":"ABL","D":"SYSTEM","E":"KERNEL","F":"STUBL",
+              "G":"CMNLIB","H":"CMNLIB64","J":"DEVCFG","K":"KM","L":"PMIC",
+              "M":"STORSEC","N":"UEFI_SEC",
+          }
+          manifest = []
+          with src.open("rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+              cursor = 0
+              while True:
+                  pos = mm.find(b"Otie", cursor)
+                  if pos < 0:
+                      break
+                  cursor = pos + 4
+                  if pos + 25 > len(mm) or mm[pos+8:pos+12] != b"indx" or mm[pos+17:pos+21] != b"data":
+                      continue
+                  idx = mm[pos+16]
+                  size = struct.unpack_from("<I", mm, pos+21)[0]
+                  start = pos + 25
+                  end = start + size
+                  if size <= 0 or end > len(mm):
+                      continue
+                  prev = mm.rfind(b"Otim", max(0, pos-32768), pos)
+                  meta = bytes(mm[prev if prev >= 0 else max(0,pos-8192):pos])
+                  mt = re.search(rb"key type ([A-Z])", meta)
+                  kt = mt.group(1).decode() if mt else None
+                  name = KEY.get(kt, f"COMPONENT_{idx}")
+                  magic = bytes(mm[start:start+16])
+                  ext = ".squashfs" if magic.startswith(b"hsqs") else ".bin"
+                  dst = out / f"{idx:02d}_{name}{ext}"
+                  h = hashlib.sha256()
+                  with dst.open("wb") as o:
+                      p = start
+                      while p < end:
+                          q = min(end, p + 4*1024*1024)
+                          chunk = mm[p:q]
+                          o.write(chunk)
+                          h.update(chunk)
+                          p = q
+                  manifest.append({
+                      "index": idx, "key_type": kt, "name": name,
+                      "size": size, "sha256": h.hexdigest(),
+                      "payload_offset": start, "magic_hex": magic.hex(),
+                      "file": dst.as_posix(),
+                  })
+
+          Path("out/component_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+          # Android boot image v0/v1-compatible basic extraction.
+          boot = Path("out/components/05_KERNEL.bin")
+          data = boot.read_bytes()
+          if data[:8] == b"ANDROID!":
+              kernel_size = struct.unpack_from("<I", data, 8)[0]
+              ramdisk_size = struct.unpack_from("<I", data, 16)[0]
+              second_size = struct.unpack_from("<I", data, 24)[0]
+              page_size = struct.unpack_from("<I", data, 36)[0]
+              def align(x):
+                  return (x + page_size - 1) // page_size * page_size
+              k0 = page_size
+              k1 = k0 + kernel_size
+              r0 = align(k1)
+              r1 = r0 + ramdisk_size
+              s0 = align(r1)
+              s1 = s0 + second_size
+              Path("out/kernel_boot/kernel.bin").write_bytes(data[k0:k1])
+              if ramdisk_size:
+                  Path("out/kernel_boot/ramdisk.bin").write_bytes(data[r0:r1])
+              if second_size:
+                  Path("out/kernel_boot/second.bin").write_bytes(data[s0:s1])
+              cmdline = data[64:64+512].split(b"\0",1)[0].decode("ascii","replace")
+              info = {
+                  "kernel_size": kernel_size,
+                  "ramdisk_size": ramdisk_size,
+                  "second_size": second_size,
+                  "page_size": page_size,
+                  "cmdline": cmdline,
+              }
+              Path("out/kernel_boot/bootimg_info.json").write_text(json.dumps(info, indent=2) + "\n")
+          PY
+
+      - name: Extract SYSTEM SquashFS
+        run: |
+          mkdir -p out/rootfs
+          unsquashfs -no-xattrs -f -d out/rootfs out/components/04_SYSTEM.squashfs
+
+      - name: Build inventories and checksums
+        run: |
+          (
+            cd out
+            find . -printf '%M %u %g %s %TY-%Tm-%TdT%TH:%TM:%TS %p -> %l\n' | sort
+          ) > out/FILESYSTEM_INVENTORY.txt
+          (
+            cd out
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > out/SHA256SUMS.txt
+          du -sh out > out/UNPACKED_SIZE.txt
+          find out/rootfs -type f | wc -l > out/ROOTFS_FILE_COUNT.txt
+
+      - name: Create preserved unpacked archive
+        run: |
+          tar --zstd -cf sapphire-24.29.03_FULL_UNPACKED.tar.zst out
+          sha256sum sapphire-24.29.03_FULL_UNPACKED.tar.zst > sapphire-24.29.03_FULL_UNPACKED.tar.zst.sha256
+          ls -lh sapphire-24.29.03_FULL_UNPACKED.tar.zst
+          cat sapphire-24.29.03_FULL_UNPACKED.tar.zst.sha256
+
+      - name: Upload unpacked firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sapphire-24.29.03-FULL-UNPACKED
+          path: |
+            sapphire-24.29.03_FULL_UNPACKED.tar.zst
+            sapphire-24.29.03_FULL_UNPACKED.tar.zst.sha256
+            out/component_manifest.json
+            out/UNPACKED_SIZE.txt
+            out/ROOTFS_FILE_COUNT.txt
+          compression-level: 0
+          retention-days: 30
