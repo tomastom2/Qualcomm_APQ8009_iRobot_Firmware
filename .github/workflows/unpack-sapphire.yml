@@ -116,8 +116,12 @@ jobs:
 
       - name: Extract SYSTEM SquashFS
         run: |
-          mkdir -p out/rootfs
-          unsquashfs -no-xattrs -f -d out/rootfs out/components/04_SYSTEM.squashfs
+          # SYSTEM contains real /dev character/block-device nodes.
+          # unsquashfs needs root to recreate those metadata entries; without
+          # sudo it extracts normal files but exits with code 2.
+          sudo mkdir -p out/rootfs
+          sudo unsquashfs -no-xattrs -f -d out/rootfs out/components/04_SYSTEM.squashfs
+          sudo chown -R "$USER":"$USER" out/rootfs
 
       - name: Build inventories and checksums
         run: |
