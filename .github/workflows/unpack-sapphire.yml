@@ -17,7 +17,7 @@ jobs:
       - name: Install extraction tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools zstd
+          sudo apt-get install -y squashfs-tools zstd zip
 
       - name: Download original signed firmware
         run: |
@@ -130,25 +130,32 @@ jobs:
           sudo bash -c 'cd out && find . -type f -print0 | sort -z | xargs -0 sha256sum' > out/SHA256SUMS.txt
           sudo du -sh out | sudo tee out/UNPACKED_SIZE.txt >/dev/null
           sudo find out/rootfs -type f | wc -l > out/ROOTFS_FILE_COUNT.txt
-          sudo chown "$USER":"$USER" out/FILESYSTEM_INVENTORY.txt out/SHA256SUMS.txt out/UNPACKED_SIZE.txt out/ROOTFS_FILE_COUNT.txt
+          sudo bash -c "find out/rootfs/dev \\( -type b -o -type c \\) -printf '%M %u %g %t:%T %p\\n' | sort" > out/DEVICE_NODES.txt || true
+          sudo chown "$USER":"$USER" out/FILESYSTEM_INVENTORY.txt out/SHA256SUMS.txt out/UNPACKED_SIZE.txt out/ROOTFS_FILE_COUNT.txt out/DEVICE_NODES.txt
 
-      - name: Create preserved unpacked archive
+      - name: Create ZIP for Windows download
         run: |
-          sudo tar --zstd -cf sapphire-24.29.03_FULL_UNPACKED.tar.zst out
-          sudo chown "$USER":"$USER" sapphire-24.29.03_FULL_UNPACKED.tar.zst
-          sha256sum sapphire-24.29.03_FULL_UNPACKED.tar.zst > sapphire-24.29.03_FULL_UNPACKED.tar.zst.sha256
-          ls -lh sapphire-24.29.03_FULL_UNPACKED.tar.zst
-          cat sapphire-24.29.03_FULL_UNPACKED.tar.zst.sha256
+          # ZIP is for easy browsing on Windows. Device nodes under rootfs/dev
+          # cannot be represented meaningfully in ZIP, so their metadata is kept
+          # in out/DEVICE_NODES.txt. Regular files, directories and symlinks are
+          # included; -y stores symlinks as symlinks instead of following them.
+          sudo zip -r -y -9 sapphire-24.29.03_FULL_UNPACKED.zip out \
+            -x 'out/rootfs/dev/*'
+          sudo chown "$USER":"$USER" sapphire-24.29.03_FULL_UNPACKED.zip
+          sha256sum sapphire-24.29.03_FULL_UNPACKED.zip > sapphire-24.29.03_FULL_UNPACKED.zip.sha256
+          ls -lh sapphire-24.29.03_FULL_UNPACKED.zip
+          cat sapphire-24.29.03_FULL_UNPACKED.zip.sha256
 
-      - name: Upload unpacked firmware artifact
+      - name: Upload unpacked firmware ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: sapphire-24.29.03-FULL-UNPACKED
+          name: sapphire-24.29.03-FULL-UNPACKED-ZIP
           path: |
-            sapphire-24.29.03_FULL_UNPACKED.tar.zst
-            sapphire-24.29.03_FULL_UNPACKED.tar.zst.sha256
+            sapphire-24.29.03_FULL_UNPACKED.zip
+            sapphire-24.29.03_FULL_UNPACKED.zip.sha256
             out/component_manifest.json
             out/UNPACKED_SIZE.txt
             out/ROOTFS_FILE_COUNT.txt
+            out/DEVICE_NODES.txt
           compression-level: 0
           retention-days: 30
