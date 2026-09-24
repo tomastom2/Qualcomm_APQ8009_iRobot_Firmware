@@ -121,24 +121,21 @@ jobs:
           # sudo it extracts normal files but exits with code 2.
           sudo mkdir -p out/rootfs
           sudo unsquashfs -no-xattrs -f -d out/rootfs out/components/04_SYSTEM.squashfs
-          sudo chown -R "$USER":"$USER" out/rootfs
+          # Keep original ownership/mode metadata intact. Later inventory/hash/archive
+          # steps use sudo when they need to read root-only or execute-only files.
 
       - name: Build inventories and checksums
         run: |
-          (
-            cd out
-            find . -printf '%M %u %g %s %TY-%Tm-%TdT%TH:%TM:%TS %p -> %l\n' | sort
-          ) > out/FILESYSTEM_INVENTORY.txt
-          (
-            cd out
-            find . -type f -print0 | sort -z | xargs -0 sha256sum
-          ) > out/SHA256SUMS.txt
-          du -sh out > out/UNPACKED_SIZE.txt
-          find out/rootfs -type f | wc -l > out/ROOTFS_FILE_COUNT.txt
+          sudo bash -c "cd out && find . -printf '%M %u %g %s %TY-%Tm-%TdT%TH:%TM:%TS %p -> %l\\n' | sort" > out/FILESYSTEM_INVENTORY.txt
+          sudo bash -c 'cd out && find . -type f -print0 | sort -z | xargs -0 sha256sum' > out/SHA256SUMS.txt
+          sudo du -sh out | sudo tee out/UNPACKED_SIZE.txt >/dev/null
+          sudo find out/rootfs -type f | wc -l > out/ROOTFS_FILE_COUNT.txt
+          sudo chown "$USER":"$USER" out/FILESYSTEM_INVENTORY.txt out/SHA256SUMS.txt out/UNPACKED_SIZE.txt out/ROOTFS_FILE_COUNT.txt
 
       - name: Create preserved unpacked archive
         run: |
-          tar --zstd -cf sapphire-24.29.03_FULL_UNPACKED.tar.zst out
+          sudo tar --zstd -cf sapphire-24.29.03_FULL_UNPACKED.tar.zst out
+          sudo chown "$USER":"$USER" sapphire-24.29.03_FULL_UNPACKED.tar.zst
           sha256sum sapphire-24.29.03_FULL_UNPACKED.tar.zst > sapphire-24.29.03_FULL_UNPACKED.tar.zst.sha256
           ls -lh sapphire-24.29.03_FULL_UNPACKED.tar.zst
           cat sapphire-24.29.03_FULL_UNPACKED.tar.zst.sha256
